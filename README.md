@@ -29,7 +29,7 @@ Then edit `.env` and add your real API keys:
 
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
-GOOGLE_API_KEY=your_google_api_key_here
+OPENAI_CHAT_MODEL=gpt-4o-mini
 ```
 
 Run the main script:
