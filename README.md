@@ -1,8 +1,8 @@
 # Knowledge Base RAG Pipeline
 
-This project builds the first half of a Retrieval-Augmented Generation, or RAG, pipeline.
+This project is a small Retrieval-Augmented Generation, or RAG, pipeline built with Python, pandas, scikit-learn, and OpenAI.
 
-The code reads articles from a CSV file, splits long article text into smaller chunks, creates embeddings for each chunk using OpenAI, and stores the text chunks and their embeddings in a pandas DataFrame.
+The app reads article content from a CSV file, splits the text into chunks, creates embeddings for every chunk, retrieves the chunks most similar to a user question, and sends the retrieved context to `gpt-4o-mini` to generate an answer.
 
 ## Setup
 
@@ -25,7 +25,7 @@ Create your local `.env` file from the example:
 cp .env.example .env
 ```
 
-Then edit `.env` and add your real API keys:
+Then edit `.env` and add your real OpenAI API key:
 
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
@@ -45,50 +45,52 @@ Security note: never commit the real `.env` file. It contains private API keys a
 ```mermaid
 flowchart LR
     A[.env file] --> B[load_dotenv]
-    C[mini-llama-articles.csv] --> D[Read CSV rows]
-    D --> E[Extract content column]
-    E --> F[Split text into chunks]
-    F --> G[Create pandas DataFrame]
-    G --> H[Generate embedding for each chunk]
-    H --> I[Insert embedding column into DataFrame]
-    I --> J[Question embedding]
-    J --> K[Later: compare question with chunks]
+    B --> C[OpenAI client]
+    D[mini-llama-articles.csv] --> E[Read CSV rows]
+    E --> F[Extract content column]
+    F --> G[Split text into chunks]
+    G --> H[Create DataFrame]
+    H --> I[Embed each chunk]
+    I --> J[Store embeddings in DataFrame]
+    K[User question] --> L[Embed question]
+    J --> M[Cosine similarity search]
+    L --> M
+    M --> N[Top relevant chunks]
+    N --> O[Build prompt]
+    O --> P[gpt-4o-mini]
+    P --> Q[Final answer]
 ```
 
-The current pipeline prepares your knowledge base for semantic search.
+The pipeline has two phases:
 
-It does not yet complete the full RAG process. The next step would be to compare the user question embedding against the chunk embeddings, retrieve the most relevant chunks, and send those chunks to a language model to generate an answer.
+1. Indexing: convert document chunks into embedding vectors.
+2. Retrieval and generation: embed the question, find relevant chunks, and ask the chat model to answer using those chunks.
 
 ## Environment Loading
 
-The OpenAI client needs an API key. The project loads that key from a `.env` file.
+The OpenAI client needs an API key. The project loads that key from `.env`.
 
 ```python
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 
 client = OpenAI()
 ```
 
-Your `.env` file should contain:
-
-```env
-OPENAI_API_KEY=your_api_key_here
-```
-
-The order matters. `load_dotenv()` must run before `client = OpenAI()`.
+The order matters. `load_dotenv()` must run before the code depends on environment variables.
 
 ```mermaid
 flowchart LR
     A[.env file] --> B[load_dotenv]
     B --> C[os.environ]
     C --> D[OpenAI client]
-    D --> E[Can call embeddings API]
+    D --> E[Embeddings API and Chat API]
 ```
 
-`load_dotenv()` reads the `.env` file and places the variables into the process environment. `OpenAI()` then automatically looks for `OPENAI_API_KEY`.
+`OPENAI_API_KEY` is read automatically by `OpenAI()`. `OPENAI_CHAT_MODEL` is read manually so you can switch the answer model without changing code.
 
 ## Dataset
 
@@ -172,12 +174,6 @@ row = [
 ]
 ```
 
-The code takes:
-
-```python
-row[1]
-```
-
 Output:
 
 ```python
@@ -198,13 +194,13 @@ def split_into_chunks(text, chunk_size=1024):
     return chunks
 ```
 
-The function receives one long text and returns a list of smaller text pieces.
+The function receives one long text and returns smaller text pieces.
 
 ```mermaid
 flowchart LR
-    A[Long text] --> B[Take characters 0 to 1023]
-    A --> C[Take characters 1024 to 2047]
-    A --> D[Take characters 2048 to 3071]
+    A[Long text] --> B[Characters 0 to 1023]
+    A --> C[Characters 1024 to 2047]
+    A --> D[Characters 2048 to 3071]
     B --> E[chunks list]
     C --> E
     D --> E
@@ -237,11 +233,9 @@ Important limitation: this splits by characters, not words, sentences, or tokens
 
 ## What Is A DataFrame?
 
-A pandas DataFrame is a table in memory.
+A pandas DataFrame is a table in memory. It has rows and columns, like a spreadsheet or SQL table.
 
-It has rows and columns, like a spreadsheet or SQL table.
-
-Before creating the DataFrame, the data is a Python list:
+Before creating the DataFrame:
 
 ```python
 chunks = [
@@ -257,7 +251,7 @@ The code creates a DataFrame:
 df = pd.DataFrame(chunks, columns=['chunk'])
 ```
 
-After that, the data looks like this:
+After that:
 
 ```text
 index | chunk
@@ -275,7 +269,7 @@ flowchart LR
     B --> C[Table with one column: chunk]
 ```
 
-The DataFrame is useful because it keeps each text chunk in a structured row. Later, the code can add another column beside each chunk: the embedding vector.
+The DataFrame is useful because each chunk becomes a row. Later, the code adds the embedding vector beside the chunk text.
 
 ## Creating Embeddings
 
@@ -290,8 +284,8 @@ def get_embedding(text):
             model="text-embedding-3-small"
         )
         return res.data[0].embedding
-    except:
-        return None
+    except Exception as e:
+        raise RuntimeError(f"Failed to create embedding: {e}") from e
 ```
 
 An embedding is a list of numbers that represents the meaning of a piece of text.
@@ -320,25 +314,11 @@ Diagram:
 ```mermaid
 flowchart TD
     A[Input text] --> B[Replace newlines with spaces]
-    B --> C[Send to OpenAI embeddings API]
-    C --> D[API returns embedding response]
-    D --> E[Take res.data[0].embedding]
+    B --> C[OpenAI embeddings API]
+    C --> D[Embedding response]
+    D --> E[res.data[0].embedding]
     E --> F[List of numbers]
 ```
-
-Input/output example:
-
-```python
-get_embedding("The sky is blue")
-```
-
-Returns something like:
-
-```python
-[0.021, -0.018, 0.004, ...]
-```
-
-The real vector is longer and comes from OpenAI.
 
 ## Generating Embeddings For Every Chunk
 
@@ -386,20 +366,13 @@ Diagram:
 
 ```mermaid
 flowchart TD
-    A[df rows] --> B[Take row 0 chunk]
+    A[df rows] --> B[Take row chunk]
     B --> C[get_embedding]
-    C --> D[append vector to embeddings]
-
-    A --> E[Take row 1 chunk]
-    E --> F[get_embedding]
-    F --> G[append vector to embeddings]
-
-    A --> H[Take row N chunk]
-    H --> I[get_embedding]
-    I --> J[append vector to embeddings]
+    C --> D[Append vector to embeddings list]
+    D --> E[Repeat for every row]
 ```
 
-`tqdm` shows a progress bar in the terminal. It does not change the data.
+`tqdm` only shows a progress bar in the terminal.
 
 ## Inserting Embeddings Into The DataFrame
 
@@ -415,8 +388,6 @@ df.insert(loc=1, column='embedding', value=embedding_values)
 Before insert:
 
 ```text
-df
-
 index | chunk
 ------+-----------------------------
 0     | chunk text 0
@@ -437,8 +408,6 @@ Embeddings:
 After insert:
 
 ```text
-df
-
 index | chunk        | embedding
 ------+--------------+-------------------------
 0     | chunk text 0 | [0.01, -0.03, ...]
@@ -457,68 +426,218 @@ flowchart LR
 
 `loc=1` means insert the new column at position 1, right after `chunk`.
 
-## Question Embeddings
+## Embedding The Question
 
 Code:
 
 ```python
 QUESTION = "How many parameters does the LLaMA2 model have?"
-
 QUESTION_EMB = get_embedding(QUESTION)
-BAD_SOURCE_EMB = get_embedding("The Sky is Blue")
-GOOD_SOURCE_EMB = get_embedding('LLaMA2 model has a total of 2B parameters.')
 ```
 
-This creates embeddings for three separate texts:
+The question becomes a vector using the same embedding model as the chunks.
+
+```mermaid
+flowchart LR
+    A[Question text] --> B[get_embedding]
+    B --> C[Question embedding]
+```
+
+This matters because retrieval compares vectors. Chunk embeddings and question embeddings must live in the same vector space.
+
+## Similarity Search
+
+Code:
+
+```python
+similarities = cosine_similarity([QUESTION_EMB], df['embedding'].tolist())
+```
+
+`cosine_similarity` compares the question embedding against every chunk embedding.
+
+Example:
+
+```python
+similarities = [[
+    0.12,  # chunk 0
+    0.87,  # chunk 1
+    0.34,  # chunk 2
+    0.91,  # chunk 3
+]]
+```
+
+Higher score means more similar meaning.
+
+Diagram:
 
 ```mermaid
 flowchart TD
-    A[Question text] --> B[get_embedding] --> C[QUESTION_EMB]
-    D[Unrelated text: The sky is blue] --> E[get_embedding] --> F[BAD_SOURCE_EMB]
-    G[Related text: LLaMA2 parameters] --> H[get_embedding] --> I[GOOD_SOURCE_EMB]
+    A[Question embedding] --> D[cosine_similarity]
+    B[Chunk embedding 0] --> D
+    C[Chunk embedding 1] --> D
+    E[Chunk embedding N] --> D
+    D --> F[Similarity scores]
 ```
 
-The likely next step is to compare these vectors using cosine similarity:
+## Selecting The Best Chunks
+
+Code:
 
 ```python
-cosine_similarity([QUESTION_EMB], [GOOD_SOURCE_EMB])
-cosine_similarity([QUESTION_EMB], [BAD_SOURCE_EMB])
+number_of_chunks_to_retrieve = 3
+indices = np.argsort(similarities[0])[::-1][:number_of_chunks_to_retrieve]
 ```
 
-Expected result:
+Step by step:
+
+```python
+similarities[0]
+```
+
+Gets the actual score list:
+
+```python
+[0.12, 0.87, 0.34, 0.91]
+```
+
+```python
+np.argsort(similarities[0])
+```
+
+Returns indexes sorted from lowest score to highest score:
+
+```python
+[0, 2, 1, 3]
+```
+
+```python
+[::-1]
+```
+
+Reverses the order so best scores come first:
+
+```python
+[3, 1, 2, 0]
+```
+
+```python
+[:number_of_chunks_to_retrieve]
+```
+
+Keeps only the top N:
+
+```python
+[3, 1, 2]
+```
+
+Those are DataFrame row positions for the most relevant chunks.
+
+Diagram:
+
+```mermaid
+flowchart LR
+    A[Similarity scores] --> B[argsort indexes]
+    B --> C[Reverse best first]
+    C --> D[Take top N]
+    D --> E[Relevant chunk indexes]
+```
+
+## Building The Context
+
+Code:
+
+```python
+retrieved_context = " ".join(df.iloc[indices]["chunk"])
+prompt = prompt.format(retrieved_context, QUESTION)
+```
+
+`df.iloc[indices]["chunk"]` means:
 
 ```text
-question vs good source -> higher similarity
-question vs bad source  -> lower similarity
+Take the chunk column from the rows selected by the retrieval indexes.
 ```
 
-This is the core idea behind retrieval in RAG.
+Example:
 
-## Current RAG Stage
+```python
+indices = [3, 1, 2]
+```
 
-Your code currently implements this:
+Then:
+
+```python
+df.iloc[indices]["chunk"]
+```
+
+returns the text from rows 3, 1, and 2.
+
+`" ".join(...)` combines those chunks into one context string.
 
 ```mermaid
 flowchart LR
-    A[Documents] --> B[Chunks]
-    B --> C[Embeddings]
-    C --> D[Searchable table]
+    A[Top chunk indexes] --> B[df.iloc indexes]
+    B --> C[Chunk texts]
+    C --> D[join into context]
+    D --> E[Prompt template]
+    F[Question] --> E
 ```
 
-A fuller RAG system would look like this:
+## Asking GPT-4o Mini
+
+Code:
+
+```python
+response = client.chat.completions.create(
+    model=OPENAI_CHAT_MODEL,
+    messages=[
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ],
+)
+
+print(response.choices[0].message.content)
+```
+
+The chat model receives:
+
+```text
+system message -> how the assistant should behave
+user message   -> retrieved context plus the user question
+```
+
+Diagram:
 
 ```mermaid
-flowchart LR
-    A[Documents] --> B[Chunks]
-    B --> C[Chunk embeddings]
-    D[User question] --> E[Question embedding]
-    E --> F[Similarity search]
-    C --> F
-    F --> G[Most relevant chunks]
-    G --> H[LLM answer]
+sequenceDiagram
+    participant App
+    participant OpenAI
+
+    App->>OpenAI: Send system prompt + retrieved context + question
+    OpenAI-->>App: Return generated answer
+    App->>App: Print response.choices[0].message.content
 ```
 
-Your current code stops before the real retrieval and answer generation step.
+Example output from a successful run:
+
+```text
+The LLaMA 2 model is available in four different sizes with the following parameters: 7 billion, 13 billion, 34 billion, and 70 billion.
+```
+
+## Full RAG Flow
+
+```mermaid
+flowchart TD
+    A[CSV article content] --> B[Split into chunks]
+    B --> C[Create chunk embeddings]
+    C --> D[Store chunk + embedding in DataFrame]
+    E[User question] --> F[Create question embedding]
+    D --> G[Compare embeddings with cosine similarity]
+    F --> G
+    G --> H[Select top 3 chunks]
+    H --> I[Build prompt with context]
+    I --> J[gpt-4o-mini]
+    J --> K[Answer]
+```
 
 ## Mental Model
 
@@ -529,10 +648,11 @@ CSV article text
     -> split into smaller pieces
     -> store pieces in a table
     -> convert each piece into numbers
-    -> store numbers beside the text
-    -> convert user question into numbers
+    -> convert the user question into numbers
     -> compare question numbers with chunk numbers
     -> retrieve the closest chunks
+    -> send those chunks to gpt-4o-mini
+    -> print the answer
 ```
 
 The key idea is that embeddings let you compare meaning, not exact words.
@@ -541,37 +661,13 @@ A question about `LLaMA2 parameters` can match a chunk that says `7 billion to 7
 
 ## Code Review Notes
 
-### 1. Avoid Bare `except`
+### 1. The Script Recomputes Embeddings Every Run
 
-Current code:
+The app currently creates embeddings for all chunks every time you run it.
 
-```python
-except:
-    return None
-```
+That is simple for learning, but inefficient and more expensive than necessary. A better next step is to save embeddings locally in a file, or store them in a vector database.
 
-This hides real errors. If your API key is missing, the network fails, or OpenAI rejects the request, you lose the useful error message.
-
-Better:
-
-```python
-except Exception as e:
-    print(f"Embedding failed: {e}")
-    return None
-```
-
-### 2. Some Imports Are Not Used Yet
-
-These imports are currently not used:
-
-```python
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-```
-
-They probably belong to the next step: comparing embeddings.
-
-### 3. Character-Based Chunking Is Simple But Limited
+### 2. Character-Based Chunking Is Simple But Limited
 
 This code splits every 1024 characters:
 
@@ -579,7 +675,7 @@ This code splits every 1024 characters:
 text[i: i+chunk_size]
 ```
 
-That is easy to understand, but it can cut words or sentences in the middle.
+That can cut words or sentences in the middle.
 
 Later, a better chunking strategy could split by:
 
@@ -588,7 +684,7 @@ Later, a better chunking strategy could split by:
 - tokens
 - overlapping windows
 
-### 4. Metadata Is Missing From The DataFrame
+### 3. Metadata Is Missing From The DataFrame
 
 The current DataFrame only stores:
 
@@ -607,20 +703,18 @@ url
 source
 ```
 
-That way, when the system retrieves an answer, you can show where the answer came from.
+That way, when the system retrieves an answer, you know where the answer came from.
 
-### 5. `read_data.py` Is Separate From The Main Pipeline
+### 4. `read_data.py` Is Separate From The Main Pipeline
 
 `read_data.py` downloads the CSV from GitHub and renders a preview table using Rich.
 
 It does not save the dataset locally, and it is not currently imported by `app.py`.
 
-## Next Recommended Step
+## Recommended Next Steps
 
-The next useful feature is retrieval:
-
-1. Embed the user question.
-2. Compare the question embedding with every chunk embedding.
-3. Sort chunks by similarity score.
-4. Return the top matching chunks.
-5. Later, send those chunks to an LLM to generate an answer.
+1. Cache embeddings so you do not pay to recreate them on every run.
+2. Store metadata like `title`, `url`, and `source` with every chunk.
+3. Turn the script into functions so each stage can be tested independently.
+4. Add a command-line input so users can ask different questions.
+5. Add basic tests for chunking, retrieval ordering, and prompt construction.
