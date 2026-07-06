@@ -30,6 +30,7 @@ Then edit `.env` and add your real OpenAI API key:
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
 
 Run the main script:
@@ -39,6 +40,95 @@ python app.py
 ```
 
 Security note: never commit the real `.env` file. It contains private API keys and is ignored by `.gitignore`.
+
+## Embedding Cache
+
+The app stores document embeddings in:
+
+```text
+.cache/document_embeddings.json
+```
+
+On the first run, the app creates embeddings for the CSV chunks and saves them locally. On later runs, it loads those saved document embeddings instead of paying to recreate them.
+
+The cache is automatically ignored by Git because it is generated data.
+
+The cache is considered stale and rebuilt when any of these change:
+
+- `mini-llama-articles.csv` file contents
+- `CHUNK_SIZE`
+- `OPENAI_EMBEDDING_MODEL`
+- internal cache format version
+
+Important: the user question is still embedded on every run. That is expected because each new question needs its own vector for similarity search. The expensive repeated part was recreating the same document embeddings every time.
+
+```mermaid
+flowchart TD
+    A[Start app] --> B[Read CSV and build chunks]
+    B --> C[Build cache metadata]
+    C --> D{Valid cache exists?}
+    D -->|Yes| E[Load cached document embeddings]
+    D -->|No| F[Call embeddings API for document chunks]
+    F --> G[Save embeddings to .cache]
+    E --> H[Embed current question]
+    G --> H
+    H --> I[Run cosine similarity search]
+```
+
+For this project, a JSON file is the best fit because the dataset is small, the cache is local, and it avoids adding infrastructure too early.
+
+## Project Structure
+
+The app is split into small modules so each part can be understood and tested separately.
+
+```text
+knowlege_base_rag/
+├── app.py
+├── rag/
+│   ├── __init__.py
+│   ├── cache.py
+│   ├── chunking.py
+│   ├── data.py
+│   ├── embeddings.py
+│   ├── prompting.py
+│   └── retrieval.py
+└── tests/
+    ├── test_cache.py
+    ├── test_chunking.py
+    └── test_retrieval.py
+```
+
+`app.py` is now the orchestration layer. It connects the pieces together and calls OpenAI.
+
+The `rag/` package contains the reusable pipeline logic:
+
+- `chunking.py` splits text into chunks.
+- `data.py` reads the CSV and builds the chunk DataFrame.
+- `embeddings.py` creates embeddings and attaches them to the DataFrame.
+- `cache.py` saves and loads document embeddings.
+- `retrieval.py` finds the most relevant chunks.
+- `prompting.py` builds the system and user prompts.
+
+The `tests/` folder checks the local logic without calling OpenAI.
+
+```bash
+python -m unittest discover -s tests
+```
+
+Pipeline:
+
+```mermaid
+flowchart TD
+    A[app.py] --> B[data.py]
+    B --> C[chunking.py]
+    A --> D[cache.py]
+    A --> E[embeddings.py]
+    A --> F[retrieval.py]
+    A --> G[prompting.py]
+    A --> H[OpenAI chat API]
+```
+
+The important design idea is separation of concerns. Each file owns one job, which makes the project easier to test and safer to change.
 
 ## Big Picture
 
